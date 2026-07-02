@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Moodle activity module (`mod_googlemeet`) that creates Google Meet rooms from Moodle, syncs recordings from Google Drive, and runs AI analysis on recordings via Google Gemini. Fork of `ronefel/moodle-mod_googlemeet` modernized for Moodle 4.0+. Current version: `$plugin->release = '2.17.6'` / `$plugin->version = 2026060123` in `version.php`.
+A Moodle activity module (`mod_googlemeet`) that creates Google Meet rooms from Moodle, syncs recordings from Google Drive, and runs AI analysis on recordings via Google Gemini. Fork of `ronefel/moodle-mod_googlemeet` modernized for Moodle 4.0+. Current version: see `version.php` (release 2.19.9 / 2026062509 as of 2026-07-02 — check the file, this line goes stale).
 
 This directory is a Moodle plugin — it is expected to live at `{moodle_root}/mod/googlemeet/`. Many files (`view.php`, `callback.php`, `cli/process_transcripts.php`) `require` Moodle's `config.php` via `__DIR__ . '/../../config.php'`, so the plugin only functions inside a Moodle installation.
 
 ## Common operations
 
-There is no build system, no composer, and no npm. All code is PHP loaded directly by Moodle. There IS now a PHPUnit suite (`tests/locallib_test.php`, `tests/subtitle_extractor_test.php`).
+There is no build system, no composer, and no npm. All code is PHP loaded directly by Moodle. There IS now a PHPUnit suite (`tests/locallib_test.php`, `tests/subtitle_extractor_test.php`, `tests/ai_service_test.php`, `tests/question_service_test.php`, `tests/notes_sanitize_test.php`). Dev runner: `bash ~/desarrollo/gm-test.sh` (syncs PHP repo→install without touching the live opcache, then runs phpunit).
 
 - **Install/upgrade**: bump `$plugin->version` in `version.php` (format `YYYYMMDDNN`) → visit Site Administration > Notifications in Moodle.
 - **Run tests**: `vendor/bin/phpunit mod/googlemeet` (from the Moodle root, after `php admin/tool/phpunit/cli/init.php`). On this box: `init.php` fails under composer/PHP 8.5, so rebuild the test DB with `php admin/tool/phpunit/cli/util.php --drop` then `--install`; also generate the `en_AU.UTF-8` locale (`localedef` into `~/.locales` + export `LOCPATH`) or tests error out.
@@ -18,7 +18,7 @@ There is no build system, no composer, and no npm. All code is PHP loaded direct
 - **Add a web service**: register it in `db/services.php` and implement the method in `classes/external.php` (uses `core_external\external_api` — Moodle 4.2+ namespaced API).
 - **Add a capability**: edit `db/access.php`.
 - **Add a scheduled task**: register in `db/tasks.php` and create the class under `classes/task/`.
-- **Language strings**: edit `lang/en/googlemeet.php` (authoritative), then `lang/es/` and `lang/pt_br/`.
+- **Language strings**: edit `lang/en/googlemeet.php` (authoritative), then `lang/es/` **in the same commit** (the site runs in Spanish; a missing `es` string ships English UI to every user — this exact drift once left ~100 base strings untranslated). `lang/pt_br/` is legacy/best-effort, do not block on it.
 - **CLI bulk transcript/AI processing**: `php admin/cli/process_transcripts.php --googlemeetid=N [--recordingid=N] [--language=es|-l es] [--dry-run] [--skip-gemini]`. Requires `/tmp/yt-dlp` binary. Subtitle language priority: `--language` > `googlemeet/subtitlelanguage` setting > `'es'`.
 - **Deploy (this box)**: the plugin is served from `formacion51/public/mod/googlemeet` (a flat copy, no `.git`). Deploy = `rsync` the repo there → run `admin/cli/upgrade.php` (CLI lives OUTSIDE `public/`) → `purge_caches` → reset web opcache via a temporary script dropped in `public/` over HTTPS (`opcache.validate_timestamps=0`). After deploy run `set_config('makerecordingspublic', 1, 'googlemeet')` (see Gotchas) or recording playback breaks.
 
@@ -35,7 +35,7 @@ There is no build system, no composer, and no npm. All code is PHP loaded direct
 ### `classes/` (namespace `mod_googlemeet`)
 
 - **`client`** — OAuth2 wrapper around `\core\oauth2\api`. Scopes: Drive + Calendar events. Key methods: `create_meeting_event()`, `syncrecordings()`, `check_login()`, `logout()`. Sync localises the Drive "Meet Recordings" folder name (English + Spanish "Registros de reuniones") and filters by meeting code (chars 24–36 of the Meet URL) plus activity name plus the optional user-defined `recordingfilter`.
-- **`gemini_client`** — Google Gemini REST client. Supports text prompts and File API uploads (for full-video analysis). API key is sent in the `x-goog-api-key` request header (never in the URL/query string). **Auto-fallback**: the attempt chain `[primary, fallback]` is built by the `model_policy` value object (see below); if the configured primary model fails it retries once with `FALLBACK_MODEL` (`gemini-2.5-flash`). If already on the fallback, throws. `DEFAULT_MODEL` is `gemini-3.1-flash-preview`.
+- **`gemini_client`** — Google Gemini REST client. Supports text prompts and File API uploads (for full-video analysis). API key is sent in the `x-goog-api-key` request header (never in the URL/query string). **Auto-fallback**: the attempt chain `[primary, fallback]` is built by the `model_policy` value object (see below); if the configured primary model fails it retries once with `FALLBACK_MODEL` (`gemini-3.1-flash-lite`). If already on the fallback, throws. `DEFAULT_MODEL` is `gemini-3.5-flash`. (Never pin a `-preview` model as default — Google retires them; that outage already happened once.)
 - **`model_policy`** (`classes/model_policy.php`) — small immutable value object encapsulating the model/fallback policy; given a primary and fallback model it exposes the de-duplicated ordered attempt chain used by `gemini_client`.
 - **`subtitle_extractor`** — Uses `yt-dlp` (expected at `/tmp/yt-dlp`) to discover the Google Drive `timedtext` URL for a recording's auto-generated captions, then downloads and parses the subtitle XML. Avoids downloading the full video.
 - **`ai_service`** — Higher-level orchestrator used by `external.php` and tasks; combines the Gemini client with DB persistence to `googlemeet_ai_analysis`.
@@ -51,14 +51,15 @@ There is no build system, no composer, and no npm. All code is PHP loaded direct
 
 ### Database (`db/install.xml`)
 
-Seven tables, all keyed to `googlemeet.id`:
+Eight tables (all FK to `googlemeet.id` except `ai_analysis` → recordings and `notify_done` → events):
 - `googlemeet` — activity instances (URL, creator email, recurrence fields, `recordingfilter`, `maxupcomingevents`, `maxrecordings`, `recordingsorder`).
 - `googlemeet_events` — concrete generated sessions (timestamps). Also holds `autosynced`, plus `syncattempts` and `nextsyncattempt` (auto-sync retry bookkeeping used by the `process_autosync` task with a cron lock; added in 2026053000 — the task referenced these columns before the schema existed and crashed without them).
-- `googlemeet_recordings` — synced Drive videos + optional transcript.
+- `googlemeet_recordings` — synced Drive videos + optional transcript (`transcripttext`/`transcriptfileid`) + Gemini meeting notes (`notestext` sanitized HTML / `notesdocid`, added 2026062500).
 - `googlemeet_notify_done` — dedupes per-user-per-event notifications.
+- `googlemeet_recording_subs` — per-user subscriptions to "new recording" notifications (unique `googlemeetid,userid`).
 - `googlemeet_holidays` — exclusion date ranges for recurring events.
 - `googlemeet_cancelled` — individually cancelled session dates with optional reason.
-- `googlemeet_ai_analysis` — one-to-one with `googlemeet_recordings`; holds `summary`, `keypoints` (JSON), `topics` (JSON), `transcript`, `language`, `status` (`pending`/`processing`/`completed`/`failed`), `aimodel`.
+- `googlemeet_ai_analysis` — one-to-one with `googlemeet_recordings`; holds `summary`, `keypoints` (JSON), `topics` (JSON), `transcript`, `language`, `status` (`pending`/`processing`/`completed`/`failed`), `aimodel`, plus retry bookkeeping (`retrycount` — 99 means permanent failure — and `nextretry`, exponential backoff 2/4/8/24h).
 
 ### Frontend
 
@@ -71,7 +72,7 @@ Seven tables, all keyed to `googlemeet.id`:
 
 - **OAuth issuer must exist before the plugin is usable.** The Moodle admin creates a Google OAuth 2 service under Site administration > Server > OAuth 2 services, then selects it in the plugin settings (`googlemeet/issuerid`). Without this, `client` constructs in a disabled state.
 - **Recording sync is *name-matched*, not event-ID-matched.** Google Meet doesn't tag Drive files with the meeting event ID, so `client::syncrecordings()` filters Drive files by meeting code (substring of the Meet URL) + activity name + the optional `recordingfilter`. If recordings don't show up, the filename likely doesn't contain any of those tokens.
-- **Gemini model fallback is visible.** The attempt chain is owned by `model_policy`; when `gemini_client` falls back from the configured primary to `FALLBACK_MODEL` (`gemini-2.5-flash`) it emits an `mtrace()` message (visible in cron/task output). `DEFAULT_MODEL` is `gemini-3.1-flash-preview`, and the `googlemeet/aimodel` setting's option list is kept in sync with the code constants.
+- **Gemini model fallback is visible.** The attempt chain is owned by `model_policy`; when `gemini_client` falls back from the configured primary to `FALLBACK_MODEL` (`gemini-3.1-flash-lite`) it emits an `mtrace()` message (visible in cron/task output). `DEFAULT_MODEL` is `gemini-3.5-flash`, and the `googlemeet/aimodel` setting's option list is kept in sync with the code constants.
 - **`subtitle_extractor` is hard-coded to look for `/tmp/yt-dlp`.** Missing binary → tier-2 of the analysis pipeline silently skips and tier-3 (full video upload) runs instead.
 - **Moodle 4.2+ namespaced externals**: `external.php` uses `core_external\external_api`. Older Moodle versions expose the same classes unnamespaced — do not add a compatibility shim unless explicitly asked; the plugin's minimum (`$plugin->requires = 2022041900`, Moodle 4.0) already covers this for supported versions.
 - **Do not call `googlemeet_print_heading` or `googlemeet_print_intro` from `view.php`.** Moodle 4.0+ activity header renders them automatically; calling them duplicates the title/description (see comment in `view.php`).
