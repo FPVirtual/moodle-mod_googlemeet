@@ -292,7 +292,7 @@ class client_test extends \advanced_testcase {
         $this->assertCount(50, explode(' or ', $chunks[0]));
         $this->assertCount(50, explode(' or ', $chunks[1]));
         $this->assertCount(21, explode(' or ', $chunks[2]));
-        $this->assertStringContainsString('parents="quote\"back\\slash"', $chunks[2]);
+        $this->assertStringContainsString('parents="quote\"back\\\\slash"', $chunks[2]);
         // Duplicate ids collapse instead of producing repeated parents terms.
         $deduped = $client->build_parents_query_chunks_for_test(['a', 'a', 'b']);
         $this->assertCount(1, $deduped);
