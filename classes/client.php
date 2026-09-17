@@ -200,7 +200,7 @@ class client {
      * @param object $service The REST service.
      * @return string[] Flat list of folder ids (roots + descendants), empty when none found.
      */
-    private function get_meet_recordings_folder_ids($service): array {
+    protected function get_meet_recordings_folder_ids($service): array {
         // Search roots in multiple languages: the new "Google Meet" folder plus the
         // legacy "Meet Recordings" name. "name contains" matches both the old
         // "Meet Recordings" and the renamed "Legacy Meet Recordings".
@@ -267,7 +267,7 @@ class client {
      * @param string[] $folderids Drive folder ids.
      * @return string[] OR fragments such as 'parents="id1" or parents="id2"', chunk-sized.
      */
-    private function build_parents_query_chunks(array $folderids): array {
+    protected function build_parents_query_chunks(array $folderids): array {
         $chunks = [];
         $folderids = array_values(array_unique($folderids));
         foreach (array_chunk($folderids, self::DRIVE_PARENTS_CHUNK_SIZE) as $group) {
