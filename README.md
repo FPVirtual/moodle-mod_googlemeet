@@ -168,6 +168,9 @@ The CLI script extracts Google Drive's auto-generated subtitles (~200KB) instead
 
 ## Changes in this fork
 
+### Version 2.29.2 (2026-10-16)
+- **Version bump only** (no functional change): overtakes the intermediate `2026101501` build that some sites already have installed, which blocked the 2.29.0 upgrade as a perceived downgrade. The last schema savepoint remains `2026100600`, already applied on those sites.
+
 ### Version 2.29.0 (2026-10-10)
 - **Folder fingerprint is now the primary recording-matching rule** (fixes production bug: renaming the Moodle activity or the meeting soft-deleted all previously synced recordings). Matching semantics are now: Drive is the source of truth for *existence*, the assigned Drive folder for *ownership*, and the file name decides nothing on its own.
   - **Drive query extension**: `syncrecordings()` now also fetches every video inside Drive folders already assigned to the activity (`googlemeet_recordings.drivefolderid`), chunked like folder discovery, so recordings whose filename no longer matches the activity name/meeting code are still returned.
