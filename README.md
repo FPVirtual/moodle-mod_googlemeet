@@ -168,6 +168,14 @@ The CLI script extracts Google Drive's auto-generated subtitles (~200KB) instead
 
 ## Changes in this fork
 
+### Version 2.29.0 (2026-10-10)
+- **Folder fingerprint is now the primary recording-matching rule** (fixes production bug: renaming the Moodle activity or the meeting soft-deleted all previously synced recordings). Matching semantics are now: Drive is the source of truth for *existence*, the assigned Drive folder for *ownership*, and the file name decides nothing on its own.
+  - **Drive query extension**: `syncrecordings()` now also fetches every video inside Drive folders already assigned to the activity (`googlemeet_recordings.drivefolderid`), chunked like folder discovery, so recordings whose filename no longer matches the activity name/meeting code are still returned.
+  - **Import rules in `filter_recordings_for_activity()`**: a file in a folder assigned to this activity is imported/kept even if its name matches nothing; a file in a folder assigned to another activity is never imported here; unassigned folders keep the name-based logic (custom filter, meeting code, name, then same-name conflict resolution).
+  - **Trash only on real deletion**: a stored recording is soft-deleted only when its Drive file id is absent from the sync result set. Renaming the activity, the meeting or the file can no longer orphan recordings.
+  - **Rename propagation**: stored rows get name/webviewlink/createdtime/duration updated in place when the Drive file changes (no delete+reinsert, so viewing progress, visibility, materials and AI analysis are preserved and no duplicate "new recording" notifications fire).
+  - Sync logs (mtrace/debugging) report how many recordings matched via folder fingerprint vs name. No schema change (reuses `drivefolderid`); version bump + purge caches after deploy.
+
 ### Version 2.28.0 (2026-10-09)
 - **Organisation-only recording links**: the recording visibility setting is now a three-way choice ("Recording link access" site setting): private (owner only), anyone with the link, or **members of the owner's Google Workspace domain**. The new `domain` mode grants Drive read access with `type: domain` restricted to the domain of the activity owner's account (e.g. everyone with an `@fpvirtualaragon.es` account can open the link, nobody outside the organisation can), with `allowFileDiscovery` disabled so files never appear in organisational Drive search. Safety guard: if the owner's email is a consumer provider (gmail.com, outlook.com, …) the grant is refused and the recording stays private, because a `domain` grant for such a domain would expose it to every user of that provider. Upgraded sites default to "Automatic", which preserves the legacy `makerecordingspublic` switch behaviour until an admin picks a mode. Applies both during sync and during background enrichment; the permission grant is also wrapped in error handling so a Drive failure no longer aborts the sync.
 
