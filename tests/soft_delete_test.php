@@ -309,6 +309,69 @@ class soft_delete_test extends \advanced_testcase {
     }
 
     /**
+     * delete_all_recordings moves every active recording to the trash (soft delete)
+     * instead of hard-deleting rows and their AI analyses — the 2026-10-16 incident
+     * was caused by the old hard-delete semantics. Rows stay restorable and the
+     * already-trashed rows are untouched.
+     */
+    public function test_delete_all_recordings_soft_deletes_and_keeps_ai_analysis(): void {
+        global $DB;
+
+        $this->resetAfterTest();
+        [, $googlemeet, $cm] = $this->create_googlemeet_fixture();
+        $activeid = $this->create_recording($googlemeet->id, 'drive-active-all');
+        $alreadytrashedid = $this->create_recording($googlemeet->id, 'drive-trashed-all', [
+            'deleted' => 1,
+            'timedeleted' => time() - 100,
+        ]);
+        $trashedbefore = (int)$DB->get_field('googlemeet_recordings', 'timedeleted', ['id' => $alreadytrashedid]);
+        $analysisid = $this->create_analysis($activeid);
+
+        $result = \mod_googlemeet_external::delete_all_recordings($googlemeet->id, $cm->id);
+
+        $this->assertSame([], $result);
+        $active = $DB->get_record('googlemeet_recordings', ['id' => $activeid], '*', MUST_EXIST);
+        $this->assertSame(1, (int)$active->deleted);
+        $this->assertGreaterThan(0, (int)$active->timedeleted);
+        // The previously trashed row is not modified again.
+        $stilltrashed = $DB->get_record('googlemeet_recordings', ['id' => $alreadytrashedid], '*', MUST_EXIST);
+        $this->assertSame($trashedbefore, (int)$stilltrashed->timedeleted);
+        // AI analyses survive so a restore brings the recording back complete.
+        $this->assertTrue($DB->record_exists('googlemeet_ai_analysis', ['id' => $analysisid, 'recordingid' => $activeid]));
+        // The soft-deleted row can still be purged (irreversibly) through purge_recording.
+        $purge = \mod_googlemeet_external::purge_recording($activeid, $cm->id);
+        $this->assertTrue($purge['success']);
+        $this->assertFalse($DB->record_exists('googlemeet_recordings', ['id' => $activeid]));
+        $this->assertFalse($DB->record_exists('googlemeet_ai_analysis', ['id' => $analysisid]));
+    }
+
+    /**
+     * Both destructive endpoints log their action as a log-store event.
+     */
+    public function test_delete_all_and_purge_emit_log_events(): void {
+        $this->resetAfterTest();
+        [, $googlemeet, $cm] = $this->create_googlemeet_fixture();
+        $recordingid = $this->create_recording($googlemeet->id, 'drive-event-log');
+
+        $sink = $this->redirectEvents();
+        \mod_googlemeet_external::delete_all_recordings($googlemeet->id, $cm->id);
+        $events = $sink->get_events();
+        $sink->close();
+        $this->assertCount(1, $events);
+        $this->assertInstanceOf(\mod_googlemeet\event\recordings_bulk_trashed::class, $events[0]);
+        $this->assertSame((int)$googlemeet->id, (int)$events[0]->objectid);
+        $this->assertSame(1, (int)$events[0]->other['count']);
+
+        $sink = $this->redirectEvents();
+        \mod_googlemeet_external::purge_recording($recordingid, $cm->id);
+        $events = $sink->get_events();
+        $sink->close();
+        $this->assertCount(1, $events);
+        $this->assertInstanceOf(\mod_googlemeet\event\recording_purged::class, $events[0]);
+        $this->assertSame($recordingid, (int)$events[0]->objectid);
+    }
+
+    /**
      * Search filtering cannot match trashed recordings because they are removed before filtering.
      */
     public function test_search_filter_does_not_match_deleted_recordings(): void {

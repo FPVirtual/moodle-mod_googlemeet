@@ -1226,8 +1226,12 @@ class client {
         }
 
         list($insql, $params) = $DB->get_in_or_equal($googlemeetids, SQL_PARAMS_NAMED);
+        // The event id MUST be the first selected column: get_records_sql() keys the
+        // result set by the first column, so selecting googlemeetid first silently
+        // collapses all events of an activity into a single row and the slot
+        // bootstrap loses almost every session.
         $rows = $DB->get_records_sql(
-            "SELECT googlemeetid, eventdate, duration
+            "SELECT id, googlemeetid, eventdate, duration
                FROM {googlemeet_events}
               WHERE googlemeetid $insql",
             $params
@@ -1245,6 +1249,26 @@ class client {
     }
 
     /**
+     * Extract the session start timestamp from a Drive recording filename.
+     *
+     * Google names recordings "<meeting title> - YYYY/MM/DD HH:MM <tz>", where the
+     * timestamp reflects when the session actually started. Returns null when the
+     * filename does not carry a parseable timestamp.
+     *
+     * @param string $name file name.
+     * @return int|null Unix timestamp or null.
+     */
+    protected static function extract_start_from_recording_name(string $name): ?int {
+        if (preg_match('/-\s*(\d{4}\/\d{2}\/\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s+[A-Za-z]{2,5}|(?:GMT|UTC)?[+-]\d{2}:?\d{2})?)/', $name, $matches)) {
+            $ts = strtotime($matches[1]);
+            if ($ts !== false && $ts > 0) {
+                return $ts;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Decide whether a name-matched recording may be imported into this activity
      * when other activities share the same name.
      *
@@ -1252,7 +1276,8 @@ class client {
      * 1. Drive folder fingerprint: recordings already assigned to a folder win;
      *    the new recording follows them (one folder per meeting series).
      * 2. Event-slot bootstrap: the activity whose scheduled slot overlaps the
-     *    recording interval the most wins. Ties are left unassigned on purpose.
+     *    recording interval the most wins; equal overlaps are broken by the
+     *    closest slot start. Ties are left unassigned on purpose.
      *
      * @param object $recording Drive recording object (needs createdTime and parents).
      * @param int $googlemeetid The current activity ID.
@@ -1275,9 +1300,16 @@ class client {
             }
         }
 
-        // 2. Event-slot bootstrap.
-        $start = !empty($recording->createdTime) ? strtotime($recording->createdTime) : false;
-        if ($start === false || $start <= 0) {
+        // 2. Event-slot bootstrap. Prefer the session start parsed from the recording
+        // filename ("Name (NNNN) - 2026/10/06 15:47 CEST"): Drive createdTime is the
+        // processing/upload time, often hours after the session started, so overlap
+        // against scheduled slots rarely matches. Fall back to createdTime when the
+        // filename carries no parseable timestamp.
+        $start = self::extract_start_from_recording_name((string)($recording->name ?? ''));
+        if ($start === null) {
+            $start = !empty($recording->createdTime) ? strtotime($recording->createdTime) : false;
+        }
+        if ($start === false || $start === null || $start <= 0) {
             debugging('mod_googlemeet: ambiguous name match without a usable recording timestamp; skipped.', DEBUG_DEVELOPER);
             return false;
         }
@@ -1325,7 +1357,9 @@ class client {
      *
      * Slots are widened by EVENT_MATCH_MARGIN_SECONDS on both sides so recordings
      * that start slightly early/late still match their session. Two candidates whose
-     * overlap differs by less than EVENT_MATCH_TIE_SECONDS count as a tie.
+     * overlap differs by less than EVENT_MATCH_TIE_SECONDS count as a tie and are
+     * broken by the distance between the recording start and the slot start; only a
+     * genuine start-time ambiguity remains a tie and stays unassigned.
      *
      * @param int $start Recording interval start (unix timestamp).
      * @param int $end Recording interval end (unix timestamp).
@@ -1336,14 +1370,19 @@ class client {
     protected static function best_event_overlap_match(int $start, int $end, array $eventslots, array $candidateids): array {
         $bestid = 0;
         $bestoverlap = 0;
+        $beststartdist = PHP_INT_MAX;
         $tied = false;
 
         foreach ($candidateids as $id) {
             $overlap = 0;
+            $startdist = PHP_INT_MAX;
             foreach ($eventslots[$id] ?? [] as $slot) {
                 $slotstart = $slot['start'] - self::EVENT_MATCH_MARGIN_SECONDS;
                 $slotend = $slot['end'] + self::EVENT_MATCH_MARGIN_SECONDS;
                 $overlap += max(0, min($end, $slotend) - max($start, $slotstart));
+                if ($overlap > 0) {
+                    $startdist = min($startdist, abs($start - (int)$slot['start']));
+                }
             }
 
             if ($overlap <= 0) {
@@ -1352,9 +1391,20 @@ class client {
             if ($overlap > $bestoverlap + self::EVENT_MATCH_TIE_SECONDS) {
                 $bestid = (int)$id;
                 $bestoverlap = $overlap;
+                $beststartdist = $startdist;
                 $tied = false;
             } else if ($bestid !== (int)$id && $overlap + self::EVENT_MATCH_TIE_SECONDS >= $bestoverlap) {
-                $tied = true;
+                // Overlap: teachers may schedule back-to-back sessions whose slots
+                // both swallow a recording. Prefer the candidate whose session STARTS
+                // closest to the recording start; only a genuine start-time ambiguity
+                // remains a tie and stays unassigned.
+                if ($startdist < $beststartdist - self::EVENT_MATCH_TIE_SECONDS) {
+                    $bestid = (int)$id;
+                    $beststartdist = $startdist;
+                    $tied = false;
+                } else if ($startdist <= $beststartdist + self::EVENT_MATCH_TIE_SECONDS) {
+                    $tied = true;
+                }
             }
         }
 

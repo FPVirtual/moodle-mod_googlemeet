@@ -76,6 +76,16 @@ Settings (Site administration → Plugins → Activity modules → Google Meet):
 - Moodle 4.0 or higher
 - PHP 7.4 or higher
 
+> **Production version floor:** the live site (www.fpvirtualaragon.es) has run intermediate builds up to version `2026101601`. Every release from 2.29.3 on ships a version strictly greater than that floor, and each release first integrates whatever hotfixes exist in production — a release must never silently revert production code (see the incident notes under 2.29.3 below).
+
+## Release checklist
+
+Every release, without exception:
+
+1. **Diff production `mod/googlemeet` against this repo** and port any production hotfixes *first*. Deploying repo code that predates production hotfixes makes Moodle treat the deploy as an upgrade and silently revert the hotfixes (this happened on 2026-10-16 and broke recording sync for every teacher with same-named activities).
+2. **Bump `$plugin->version` for ANY code change** — schema, strings, tasks, events or behaviour. Never deploy without a version bump; Moodle only applies plugin changes it sees as an upgrade.
+3. **The release version must always be greater than the deployed version.** Check the version installed on the production site before choosing the new one.
+
 ## Installation
 
 1. Copy this plugin to the `mod/googlemeet` folder on the server
@@ -167,6 +177,17 @@ Subtitle language priority: `--language`/`-l` flag > `googlemeet/subtitlelanguag
 The CLI script extracts Google Drive's auto-generated subtitles (~200KB) instead of downloading the full video (~1GB), making it much faster and lighter.
 
 ## Changes in this fork
+
+### Version 2.29.3 (2026-10-16) — version 2026101700
+Post-incident release. On 2026-10-16 a deploy of 2.29.2 (version `2026101600`) silently reverted three sync hotfixes that were live in production under version `2026101501` (Moodle treated the lower build as superseded), breaking recording sync for all 26 teachers with same-named activities; while sync was broken, a teacher used the new "delete all recordings" button and permanently lost the recording rows (visibility, progress, materials links) of three activities. This release ports the hotfixes into the repo and hardens the deletion paths.
+
+- **Ported the three production sync hotfixes verbatim** (`classes/client.php`):
+  - `load_event_slots()` now selects the event `id` as the first column — `get_records_sql()` keys its result set by the first column, so the old query collapsed all events of an activity into one row and the event-slot bootstrap lost almost every session.
+  - New `extract_start_from_recording_name()`: the event-slot bootstrap now prefers the session start parsed from the recording filename (`<title> - YYYY/MM/DD HH:MM <tz>`). Drive `createdTime` is the processing/upload time, typically 2–3 hours after the session started, so overlap against scheduled slots rarely matched even with the ±15 min margin. Old-style names like `abc-def-ghi (2026-06-09 16:44 GMT+2)` keep falling back to `createdTime` (dash dates inside parens do not match the slash-date pattern).
+  - `best_event_overlap_match()` breaks equal-overlap ties by slot-start distance: a recording fully contained in two back-to-back sessions (e.g. 18:50–19:40 and 19:20–19:40 swallowing a 19:19 recording) is assigned to the session that starts closest to the recording start; only a genuine start-time ambiguity stays unassigned.
+- **"Delete all recordings" is now a bulk trash, not a hard delete** (`classes/external.php`): `delete_all_recordings()` soft-deletes every active row (`deleted = 1`), consistent with the plugin's trash semantics. AI analyses, viewing progress, visibility and materials links survive and each recording can be restored individually from the trash. The only irreversible removal remains `purge_recording()` on an already-trashed row. Both actions are now logged as events (`recordings_bulk_trashed`, `recording_purged`).
+- **Release checklist** added to the README (port production hotfixes first; bump `$plugin->version` for any code change; release version must exceed the deployed version). Production version floor: `2026101601`.
+- Regression tests in `tests/client_test.php` (event-slot loading, filename timestamp extraction, tie-breaking, full same-named-activities scenario) and `tests/soft_delete_test.php` (bulk-trash semantics, event logging).
 
 ### Version 2.29.2 (2026-10-16)
 - **Version bump only** (no functional change): overtakes the intermediate `2026101501` build that some sites already have installed, which blocked the 2.29.0 upgrade as a perceived downgrade. The last schema savepoint remains `2026100600`, already applied on those sites.

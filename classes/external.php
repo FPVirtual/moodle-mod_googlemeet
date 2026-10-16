@@ -201,7 +201,14 @@ class mod_googlemeet_external extends external_api {
     }
 
     /**
-     * Removes all recordings from Google Meet.
+     * Move all recordings of an activity to the teacher trash.
+     *
+     * This soft-deletes every active recording row (deleted = 1), consistent with
+     * the trash semantics used by sync and trash_recording(): the rows (visibility,
+     * progress, materials links, AI analyses) are preserved and each recording can
+     * be restored individually from the trash. Nothing is hard-deleted here; the
+     * only irreversible removal is purge_recording() on an already-trashed row.
+     * The action is logged (recordings_bulk_trashed event).
      *
      * @param int $googlemeetid the googlemeet ID
      * @param int $coursemoduleid the course module ID
@@ -228,17 +235,33 @@ class mod_googlemeet_external extends external_api {
         // Always operate on the instance bound to the validated course module (prevent IDOR).
         $googlemeetid = $cm->instance;
 
-        // Get recording IDs to delete associated AI analyses.
-        $recordingids = $DB->get_fieldset_select('googlemeet_recordings', 'id', 'googlemeetid = ?', [$googlemeetid]);
-        if (!empty($recordingids)) {
-            list($insql, $inparams) = $DB->get_in_or_equal($recordingids);
-            $DB->delete_records_select('googlemeet_ai_analysis', "recordingid $insql", $inparams);
+        // Soft-delete all active rows in one statement; AI analyses, materials and
+        // progress are deliberately kept so restoring brings each recording back
+        // complete. Previously trashed rows are left untouched.
+        $now = time();
+        $count = $DB->count_records('googlemeet_recordings', ['googlemeetid' => $googlemeetid, 'deleted' => 0]);
+        if ($count > 0) {
+            $DB->execute(
+                "UPDATE {googlemeet_recordings}
+                    SET deleted = 1, timedeleted = :timedeleted, timemodified = :timemodified
+                  WHERE googlemeetid = :googlemeetid AND deleted = 0",
+                [
+                    'timedeleted' => $now,
+                    'timemodified' => $now,
+                    'googlemeetid' => $googlemeetid,
+                ]
+            );
         }
 
-        $DB->delete_records('googlemeet_recordings', ['googlemeetid' => $googlemeetid]);
-
         // Use set_field instead of get_record + update_record.
-        $DB->set_field('googlemeet', 'lastsync', time(), ['id' => $googlemeetid]);
+        $DB->set_field('googlemeet', 'lastsync', $now, ['id' => $googlemeetid]);
+
+        $event = \mod_googlemeet\event\recordings_bulk_trashed::create([
+            'objectid' => $googlemeetid,
+            'context' => $context,
+            'other' => ['count' => $count],
+        ]);
+        $event->trigger();
 
         return [];
     }
@@ -398,6 +421,9 @@ class mod_googlemeet_external extends external_api {
     /**
      * Permanently delete one soft-deleted recording and its plugin-owned dependents.
      *
+     * Only already-trashed rows can be purged; the action is irreversible and is
+     * logged (recording_purged event).
+     *
      * @param int $recordingid The recording ID
      * @param int $coursemoduleid The course module ID
      * @return array
@@ -428,6 +454,17 @@ class mod_googlemeet_external extends external_api {
         $fs->delete_area_files($context->id, 'mod_googlemeet', 'recordingmaterial', $recording->id);
         $DB->delete_records('googlemeet_ai_analysis', ['recordingid' => $recording->id]);
         $DB->delete_records('googlemeet_recordings', ['id' => $recording->id]);
+
+        // The row is gone for good: log who purged it and what it was.
+        $event = \mod_googlemeet\event\recording_purged::create([
+            'objectid' => $recording->id,
+            'context' => $context,
+            'other' => [
+                'coursemoduleid' => $cm->id,
+                'recordingname' => (string)$recording->name,
+            ],
+        ]);
+        $event->trigger();
 
         return ['success' => true];
     }

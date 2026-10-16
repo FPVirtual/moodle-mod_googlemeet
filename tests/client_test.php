@@ -67,6 +67,26 @@ class client_testable_client extends client {
     }
 
     /**
+     * Expose the filename timestamp extractor for unit tests.
+     *
+     * @param string $name File name.
+     * @return int|null
+     */
+    public static function extract_start_from_recording_name_for_test(string $name): ?int {
+        return self::extract_start_from_recording_name($name);
+    }
+
+    /**
+     * Expose the event slot loader for unit tests.
+     *
+     * @param int[] $googlemeetids Activity ids.
+     * @return array
+     */
+    public function load_event_slots_for_test(array $googlemeetids): array {
+        return $this->load_event_slots($googlemeetids);
+    }
+
+    /**
      * Expose same-name conflict resolution for unit tests.
      *
      * @param object $recording Drive recording object.
@@ -464,6 +484,189 @@ class client_test extends \advanced_testcase {
 
         $this->assertGreaterThan(0, $match['overlap']);
         $this->assertTrue($match['tied']);
+    }
+
+    /**
+     * A recording fully contained in two back-to-back slots is assigned to the
+     * session whose start is closest to the recording start, not left unassigned.
+     */
+    public function test_best_event_overlap_match_breaks_overlap_ties_by_closest_slot_start(): void {
+        $room1 = 101;
+        $room2 = 102;
+        $eventslots = [
+            $room1 => [['start' => strtotime('2026-10-06 18:50:00 UTC'), 'end' => strtotime('2026-10-06 19:40:00 UTC')]],
+            $room2 => [['start' => strtotime('2026-10-06 19:20:00 UTC'), 'end' => strtotime('2026-10-06 19:40:00 UTC')]],
+        ];
+
+        // 19:19-19:30 is inside BOTH slots: identical overlap, but room2 starts one
+        // minute after the recording while room1 starts 29 minutes before it.
+        $match = client_testable_client::best_event_overlap_match_for_test(
+            strtotime('2026-10-06 19:19:00 UTC'),
+            strtotime('2026-10-06 19:30:00 UTC'),
+            $eventslots,
+            [$room1, $room2]
+        );
+
+        $this->assertSame($room2, $match['googlemeetid']);
+        $this->assertFalse($match['tied']);
+    }
+
+    /**
+     * When the recording start is equidistant from both slot starts the match
+     * stays a tie and the recording remains unassigned.
+     */
+    public function test_best_event_overlap_match_equal_start_distances_stay_tied(): void {
+        $room1 = 101;
+        $room2 = 102;
+        $eventslots = [
+            $room1 => [['start' => strtotime('2026-10-06 18:55:00 UTC'), 'end' => strtotime('2026-10-06 19:35:00 UTC')]],
+            $room2 => [['start' => strtotime('2026-10-06 19:03:00 UTC'), 'end' => strtotime('2026-10-06 19:43:00 UTC')]],
+        ];
+
+        // Recording 18:59-19:19 overlaps both slots fully (20 minutes each) and its
+        // start is exactly 4 minutes away from both slot starts.
+        $match = client_testable_client::best_event_overlap_match_for_test(
+            strtotime('2026-10-06 18:59:00 UTC'),
+            strtotime('2026-10-06 19:19:00 UTC'),
+            $eventslots,
+            [$room1, $room2]
+        );
+
+        $this->assertGreaterThan(0, $match['overlap']);
+        $this->assertTrue($match['tied']);
+    }
+
+    /**
+     * load_event_slots() returns every event row of each activity. Regression test:
+     * the result must be keyed per activity with ALL its slots, not collapsed into
+     * one row per activity by get_records_sql() keying on the first column.
+     */
+    public function test_load_event_slots_returns_all_events_per_activity(): void {
+        global $DB;
+
+        $this->resetAfterTest();
+        [, $room1, $room2] = $this->create_same_name_rooms();
+        $now = time();
+        foreach ([
+            [$room1->id, $now + HOURSECS, HOURSECS],
+            [$room1->id, $now + 3 * HOURSECS, 30 * MINSECS],
+            [$room2->id, $now + 2 * HOURSECS, HOURSECS],
+        ] as [$googlemeetid, $eventdate, $duration]) {
+            $DB->insert_record('googlemeet_events', (object)[
+                'googlemeetid' => $googlemeetid,
+                'eventdate' => $eventdate,
+                'duration' => $duration,
+                'timemodified' => $now,
+                'autosynced' => 0,
+                'syncattempts' => 0,
+                'nextsyncattempt' => 0,
+            ]);
+        }
+
+        $client = $this->make_client();
+        $slots = $client->load_event_slots_for_test([$room1->id, $room2->id]);
+
+        $this->assertCount(2, $slots[$room1->id]);
+        $this->assertCount(1, $slots[$room2->id]);
+        $starts = array_map(static fn($slot) => $slot['start'], $slots[$room1->id]);
+        sort($starts);
+        $this->assertSame([$now + HOURSECS, $now + 3 * HOURSECS], $starts);
+        $this->assertSame($now + 2 * HOURSECS, $slots[$room2->id][0]['start']);
+    }
+
+    /**
+     * The session start is parsed from the "YYYY/MM/DD HH:MM <tz>" suffix Google puts
+     * in recording names; old-style dash dates in parentheses and garbage return null
+     * so the caller falls back to Drive createdTime (or skips the recording).
+     */
+    public function test_extract_start_from_recording_name_variants(): void {
+        $cest = client_testable_client::extract_start_from_recording_name_for_test(
+            'Videotutoría (1234) - 2026/10/06 15:47 CEST');
+        $this->assertNotNull($cest);
+        $this->assertSame(strtotime('2026/10/06 15:47 CEST'), $cest);
+
+        $gmt = client_testable_client::extract_start_from_recording_name_for_test(
+            'Videotutoría (5678) - 2026/06/09 16:44 GMT+2');
+        $this->assertNotNull($gmt);
+        $this->assertSame(strtotime('2026/06/09 16:44 GMT+2'), $gmt);
+
+        // Old-style name: dash date inside parentheses must NOT match (falls back to createdTime).
+        $this->assertNull(client_testable_client::extract_start_from_recording_name_for_test(
+            'abc-def-ghi (2026-06-09 16:44 GMT+2)'));
+        $this->assertNull(client_testable_client::extract_start_from_recording_name_for_test(
+            'random garbage without any timestamp'));
+        $this->assertNull(client_testable_client::extract_start_from_recording_name_for_test(''));
+    }
+
+    /**
+     * THE production shape: a teacher clones one same-named videotutoria activity per
+     * course, each with weekly slots. Recordings named "<title> - YYYY/MM/DD HH:MM <tz>"
+     * must bootstrap into the activity whose slot contains the filename timestamp, even
+     * though Drive createdTime (the upload time, hours later) falls outside the slot.
+     */
+    public function test_same_named_activities_bootstrap_from_filename_timestamps(): void {
+        global $DB;
+
+        $this->resetAfterTest();
+        $this->setAdminUser();
+
+        $course = $this->getDataGenerator()->create_course();
+        $rooms = [];
+        foreach (['aaa-bbbb-ccc', 'ddd-eeee-fff', 'ggg-hhhh-iii'] as $code) {
+            $rooms[] = $this->getDataGenerator()->create_module('googlemeet', [
+                'course' => $course->id,
+                'name' => 'Videotutoría',
+                'url' => 'https://meet.google.com/' . $code,
+            ]);
+        }
+
+        // Weekly slots: room 0 at 10:00, room 1 at 12:00, room 2 at 18:00 (1 h each),
+        // two occurrences each (two consecutive weeks).
+        $hours = [10, 12, 18];
+        $now = time();
+        foreach ($rooms as $i => $room) {
+            foreach (['2026-10-06', '2026-10-13'] as $day) {
+                $DB->insert_record('googlemeet_events', (object)[
+                    'googlemeetid' => $room->id,
+                    'eventdate' => strtotime($day . ' ' . $hours[$i] . ':00:00 UTC'),
+                    'duration' => HOURSECS,
+                    'timemodified' => $now,
+                    'autosynced' => 0,
+                    'syncattempts' => 0,
+                    'nextsyncattempt' => 0,
+                ]);
+            }
+        }
+
+        $client = $this->make_client();
+        $ids = array_map(static fn($room) => (int)$room->id, $rooms);
+        $eventslots = $client->load_event_slots_for_test($ids);
+
+        foreach ($rooms as $i => $room) {
+            // The session starts 4 minutes into the slot; Drive only finished
+            // processing (createdTime) three hours later, outside every slot.
+            $sessionstart = strtotime('2026-10-06 ' . $hours[$i] . ':04:00 UTC');
+            $recording = (object)[
+                'name' => 'Videotutoría (' . rand(1000, 9999) . ') - ' . gmdate('Y/m/d H:i', $sessionstart) . ' GMT',
+                'createdTime' => gmdate('Y-m-d\TH:i:s\Z', $sessionstart + 3 * HOURSECS),
+                'videoMediaMetadata' => (object)['durationMillis' => 30 * MINSECS * 1000],
+                'parents' => ['folder-unknown'],
+            ];
+            $conflicts = array_values(array_diff($ids, [(int)$room->id]));
+
+            $this->assertTrue(
+                $client->recording_passes_conflict_resolution_for_test(
+                    $recording, (int)$room->id, $conflicts, $eventslots),
+                'Recording of room ' . $i . ' must be importable into its own activity.'
+            );
+            foreach ($conflicts as $otherid) {
+                $this->assertFalse(
+                    $client->recording_passes_conflict_resolution_for_test(
+                        $recording, $otherid, array_values(array_diff($ids, [$otherid])), $eventslots),
+                    'Recording of room ' . $i . ' must not leak into activity ' . $otherid . '.'
+                );
+            }
+        }
     }
 
     /**
