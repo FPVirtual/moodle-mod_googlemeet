@@ -317,7 +317,9 @@ class folder_primary_matching_test extends \advanced_testcase {
         global $DB;
 
         [, $googlemeet] = $this->create_googlemeet_fixture();
-        $this->create_recording($googlemeet->id, 'drive-1', ['name' => 'Old name']);
+        // Non-customised row: drivename still matches the auto-imported name, so
+        // a Drive-side rename propagates to the display name.
+        $this->create_recording($googlemeet->id, 'drive-1', ['name' => 'Old name', 'drivename' => 'Old name']);
 
         $result = sync_recordings($googlemeet->id, [$this->drive_file('drive-1', 'New name')]);
 

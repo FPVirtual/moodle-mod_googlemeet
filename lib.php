@@ -1153,10 +1153,27 @@ function sync_recordings($googlemeetid, $files, bool $deferenrichment = false) {
         // place — never deleted+reinserted: the row carries student viewing
         // progress, the visibility flag, materials and AI analysis, and a
         // reinsert would re-fire "new recording" notifications.
+        //
+        // Name handling: drivename tracks the last Drive-side file name. The
+        // display name is overwritten from Drive ONLY while it still equals
+        // drivename (i.e. it is the auto-imported name and nobody customised
+        // it). When name != drivename the teacher personalised the title, and
+        // the Moodle custom name always wins over later Drive renames.
         if ($incoming) {
             $update = ['id' => $googlemeetrecording->id];
-            if (isset($incoming->name) && $incoming->name !== $googlemeetrecording->name) {
-                $update['name'] = $incoming->name;
+            $drivename = isset($googlemeetrecording->drivename) ? $googlemeetrecording->drivename : null;
+            if (isset($incoming->name) && $incoming->name !== $drivename) {
+                $update['drivename'] = $incoming->name;
+                if ($drivename !== null && $drivename !== ''
+                        && $googlemeetrecording->name === $drivename) {
+                    // Not customised: propagate the Drive-side rename.
+                    $update['name'] = $incoming->name;
+                }
+                // Legacy rows (drivename = null, created before this column
+                // existed) keep their stored name: it is impossible to tell a
+                // teacher rename apart from an unsynced Drive rename, so the
+                // potentially personalised title is protected and drivename is
+                // initialised from the current Drive file name instead.
             }
             if (!empty($incoming->webViewLink) && $incoming->webViewLink !== $googlemeetrecording->webviewlink) {
                 $update['webviewlink'] = $incoming->webViewLink;
@@ -1206,6 +1223,7 @@ function sync_recordings($googlemeetid, $files, bool $deferenrichment = false) {
             $update = (object)[
                 'id' => $existing->id,
                 'name' => $restorerecording->name,
+                'drivename' => $restorerecording->name,
                 'createdtime' => $restorerecording->createdTime,
                 'duration' => $restorerecording->duration,
                 'webviewlink' => $restorerecording->webViewLink,
@@ -1232,6 +1250,7 @@ function sync_recordings($googlemeetid, $files, bool $deferenrichment = false) {
             $recording->googlemeetid = $googlemeetid;
             $recording->recordingid = $insertrecording->recordingId;
             $recording->name = $insertrecording->name;
+            $recording->drivename = $insertrecording->name;
             $recording->createdtime = $insertrecording->createdTime;
             $recording->duration = $insertrecording->duration;
             $recording->webviewlink = $insertrecording->webViewLink;

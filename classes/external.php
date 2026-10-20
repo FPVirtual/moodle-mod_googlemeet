@@ -90,10 +90,15 @@ class mod_googlemeet_external extends external_api {
         $recording = $DB->get_record('googlemeet_recordings',
             ['id' => $recordingid, 'googlemeetid' => $cm->instance, 'deleted' => 0], '*', MUST_EXIST);
 
-        $recording->name = $name;
-        $recording->timemodified = time();
-
-        $DB->update_record('googlemeet_recordings', $recording);
+        // Update only the display name: drivename (the last Drive-side file name
+        // seen by sync) must stay untouched, otherwise the next sync could not
+        // tell this teacher rename apart from an auto-imported name and would
+        // overwrite it.
+        $DB->update_record('googlemeet_recordings', (object)[
+            'id' => $recording->id,
+            'name' => $name,
+            'timemodified' => time(),
+        ]);
 
         return (object)[
             'name' => $recording->name,

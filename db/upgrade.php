@@ -489,5 +489,21 @@ function xmldb_googlemeet_upgrade($oldversion) {
         upgrade_mod_savepoint(true, 2026100600, 'googlemeet');
     }
 
+    if ($oldversion < 2026101800) {
+
+        // Last Drive-side file name seen for the recording. Sync only overwrites the
+        // display name from Drive while it still matches drivename (auto-imported name);
+        // a teacher-personalised title (name != drivename) is kept. Existing rows start
+        // with drivename = null and are initialised lazily by the first post-upgrade sync.
+        $table = new xmldb_table('googlemeet_recordings');
+        $field = new xmldb_field('drivename', XMLDB_TYPE_CHAR, '255', null, null, null, null, 'drivefolderid');
+
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        upgrade_mod_savepoint(true, 2026101800, 'googlemeet');
+    }
+
     return true;
 }

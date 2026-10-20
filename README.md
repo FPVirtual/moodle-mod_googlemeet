@@ -178,6 +178,17 @@ The CLI script extracts Google Drive's auto-generated subtitles (~200KB) instead
 
 ## Changes in this fork
 
+### Version 2.29.4 (2026-10-20) — version 2026101800
+Teacher-renamed recording titles now survive sync. Every sync used to revert custom names (e.g. "Tema 3: evaluación y criterios") back to the auto-generated Drive filename, because the rename-propagation block in `sync_recordings()` could not tell a teacher-customised title apart from a stale auto-imported one.
+
+- **New `googlemeet_recordings.drivename` column** (`db/install.xml` + `db/upgrade.php` step `2026101800`): stores the last Drive-side file name seen for the recording. Sync always updates it; the display `name` is overwritten from Drive **only while it still equals `drivename`** (i.e. nobody customised it). When `name != drivename` the teacher personalised the title, and **the Moodle custom name always wins** — even if the file is later renamed in Google Drive, the custom title is kept and only `drivename` follows Drive. The rule is per recording row.
+- **Rename path hardening** (`classes/external.php`): `recording_edit_name()` now updates only the display name, leaving `drivename` untouched.
+- **Metadata still propagates unconditionally**: `webviewlink`, `createdtime` and `duration` keep updating in place on every sync (no delete+reinsert, so viewing progress, visibility, materials and AI analysis are preserved and no duplicate "new recording" notifications fire). Notes and `drivefolderid` backfill are unchanged, and the "updated" sync stat only counts real changes.
+- **Legacy rows** (`drivename = null`, created before this column): initialised lazily by the first post-upgrade sync, which sets `drivename` from the current Drive file name and keeps the stored name — a legacy custom title cannot be distinguished from an unsynced Drive rename, so the potentially personalised title is protected.
+- Teacher-facing help text in the recording hub explains that a custom name is never overwritten by future syncs. Regression tests in `tests/recording_name_sync_test.php`.
+- **Corrected `recordingfilter` help text** (`lang/en`, `lang/es`): the old wording claimed sync would *only* include recordings whose filename contains the custom filter, but the sync has always treated it as an additional (widening) match alongside the activity name / meeting code and assigned-folder matching. The strings now describe the additive behaviour so teachers are not misled into expecting an exclusive filter.
+- Release version `2026101800` is strictly greater than the production floor `2026101601`; the three 2.29.3 sync hotfixes remain included.
+
 ### Version 2.29.3 (2026-10-16) — version 2026101700
 Post-incident release. On 2026-10-16 a deploy of 2.29.2 (version `2026101600`) silently reverted three sync hotfixes that were live in production under version `2026101501` (Moodle treated the lower build as superseded), breaking recording sync for all 26 teachers with same-named activities; while sync was broken, a teacher used the new "delete all recordings" button and permanently lost the recording rows (visibility, progress, materials links) of three activities. This release ports the hotfixes into the repo and hardens the deletion paths.
 

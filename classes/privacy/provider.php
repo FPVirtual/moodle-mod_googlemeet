@@ -139,6 +139,7 @@ class provider implements
                 'notestext' => 'privacy:metadata:googlemeet_recordings:notestext',
                 'notesdocid' => 'privacy:metadata:googlemeet_recordings:notesdocid',
                 'drivefolderid' => 'privacy:metadata:googlemeet_recordings:drivefolderid',
+                'drivename' => 'privacy:metadata:googlemeet_recordings:drivename',
             ],
             'privacy:metadata:googlemeet_recordings'
         );
